@@ -1,0 +1,118 @@
+name: Upload artifact to JFrog Artifactory
+
+on:
+  workflow_call:
+    inputs:
+      jfrog-url:
+        description: URL to JFrog platform
+        type: string
+        required: true
+      jfrog-repository:
+        description: JFrog local repository to authenticate and publish
+        type: string
+        required: true
+      jfrog-build-name:
+        description: JFrog build name to associate with the uploaded artifact
+        type: string
+        required: false
+        default: ${{ github.repository }}
+      jfrog-build-number:
+        description: JFrog build number to associate with the uploaded artifact
+        type: string
+        required: false
+        default: ${{ github.workflow }}-${{ github.run_number }}
+      workflow-artifact-name:
+        description: Source artifact name to download workflow
+        type: string
+        required: true
+      artifact-source-path:
+        description: Local file system path to artifacts that should be uploaded to Artifactory
+        type: string
+        required: false
+        default: ./
+      artifact-target-path:
+        description: Target path within the artifact repository
+        type: string
+        required: true
+      archive-artifact:
+        description: Set to "zip" deploy the files inside a ZIP archive, otherwise set to empty string
+        type: string
+        required: false
+        default: zip
+    secrets:
+      jfrog-access-token:
+        description: Access token for NPM registry
+        required: true
+    outputs:
+      artifact-path:
+        description: Full path to uploaded artifact including artifact repository and basename
+        value: ${{ jobs.upload.outputs.artifact-path }}
+      artifact-basename:
+        description: Basename of artifact's path
+        value: ${{ jobs.upload.outputs.artifact-basename }}
+      jfrog-build-name:
+        description: JFrog build name used
+        value: ${{ jobs.upload.outputs.jfrog-build-name }}
+      jfrog-build-number:
+        description: JFrog build number used
+        value: ${{ jobs.upload.outputs.jfrog-build-number }}
+
+jobs:
+  upload:
+    name: Upload `${{ inputs.workflow-artifact-name }}` artifact to `${{ inputs.jfrog-repository }}`
+    runs-on: ubuntu-latest
+    env:
+      JFROG_ARTIFACT_PATH: ${{ inputs.jfrog-repository }}/${{ inputs.artifact-target-path }}
+      JFROG_BUILD_NAME: ${{ inputs.jfrog-build-name }}
+      JFROG_BUILD_NUMBER: ${{ inputs.jfrog-build-number }}
+      ARTIFACT_SOURCE_PATH: ${{ inputs.artifact-source-path }}
+      ARCHIVE_ARTIFACT: ${{ inputs.archive-artifact }}
+    outputs:
+      artifact-path: ${{ steps.set-job-outputs.outputs.artifact-path }}
+      artifact-basename: ${{ steps.set-job-outputs.outputs.artifact-basename }}
+      jfrog-build-name: ${{ steps.set-job-outputs.outputs.jfrog-build-name }}
+      jfrog-build-number: ${{ steps.set-job-outputs.outputs.jfrog-build-number }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        id: download-artifact
+        with:
+          name: ${{ inputs.workflow-artifact-name }}
+          path: temp/${{ inputs.workflow-artifact-name }}
+
+      - uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ inputs.jfrog-url }}
+          JF_ACCESS_TOKEN: ${{ secrets.jfrog-access-token }}
+
+      - name: Configure JFrog CLI
+        run: |
+          echo "JFROG_CLI_BUILD_NAME=$JFROG_BUILD_NAME" | tee --append "$GITHUB_ENV"
+          echo "JFROG_CLI_BUILD_NUMBER=$JFROG_BUILD_NUMBER" | tee --append "$GITHUB_ENV"
+
+      - name: Verify Artifactory is accessible
+        run: jf rt ping
+
+      - name: Upload to ${{ inputs.jfrog-repository }} artifact repository
+        working-directory: ${{ steps.download-artifact.outputs.download-path }}
+        run: |
+          jf rt upload "$ARTIFACT_SOURCE_PATH" "$JFROG_ARTIFACT_PATH" --archive="$ARCHIVE_ARTIFACT" --detailed-summary --fail-no-op
+
+      - name: Set job outputs
+        id: set-job-outputs
+        run: |
+          echo "artifact-path=$JFROG_ARTIFACT_PATH" | tee --append "$GITHUB_OUTPUT"
+          echo "artifact-basename=${JFROG_ARTIFACT_PATH##*/}" | tee --append "$GITHUB_OUTPUT"
+          echo "branch-name=${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}" | tee --append "$GITHUB_OUTPUT"
+          echo "jfrog-build-name=$JFROG_CLI_BUILD_NAME" | tee --append "$GITHUB_OUTPUT"
+          echo "jfrog-build-number=$JFROG_CLI_BUILD_NUMBER" | tee --append "$GITHUB_OUTPUT"
+
+      - name: Publish build info
+        env:
+          BRANCH_NAME: ${{ steps.set-job-outputs.outputs.branch-name }}
+        run: |
+          jf rt build-add-git
+          jf rt build-publish --detailed-summary
+          jf rt set-props "$JFROG_ARTIFACT_PATH" "build.branch=$BRANCH_NAME"
